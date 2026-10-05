@@ -127,13 +127,15 @@ export class AudioService {
         tempMp3Out,
       );
 
-      // 3. Spawn yt-dlp with resilient fallback format
+      // 3. Spawn yt-dlp with resilient fallback format and mobile client extractor
       const ytdlpArgs = [
         '-f',
         'ba/b',
         '--no-playlist',
         '--no-warnings',
         '--no-check-certificates',
+        '--extractor-args',
+        'youtube:player_client=android,web',
         '-o',
         '-',
         sanitizedUrl,

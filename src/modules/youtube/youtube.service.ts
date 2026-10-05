@@ -21,10 +21,12 @@ export class YoutubeService {
         '--no-playlist',
         '--no-warnings',
         '--no-check-certificates',
+        // Force yt-dlp to query mobile player clients, bypassing datacenter format restrictions
+        '--extractor-args',
+        'youtube:player_client=android,web',
         sanitizedUrl,
       ];
 
-      // Auto-detect cookies from env or file path
       const cookiePath = process.env.YOUTUBE_COOKIES_PATH || '/tmp/cookies.txt';
       if (fs.existsSync(cookiePath)) {
         args.push('--cookies', cookiePath);
@@ -76,7 +78,6 @@ export class YoutubeService {
           const rawInfo = JSON.parse(stdoutData);
           const durationInSeconds = Number(rawInfo.duration) || 0;
 
-          // Reject excessively long videos to preserve Render free tier limits
           const MAX_DURATION_SECONDS = 1800; // 30 minutes
           if (durationInSeconds > MAX_DURATION_SECONDS) {
             this.logger.warn(
