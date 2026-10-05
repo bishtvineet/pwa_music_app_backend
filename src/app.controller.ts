@@ -21,6 +21,7 @@ export class AppController {
   async debugYtdlp(@Query('url') url?: string): Promise<any> {
     const targetUrl = url || 'https://youtu.be/dQw4w9WgXcQ';
     const cookiePath = process.env.YOUTUBE_COOKIES_PATH || '/tmp/cookies.txt';
+    const proxyUrl = process.env.YOUTUBE_PROXY_URL;
 
     const cookieExists = fs.existsSync(cookiePath);
     let cookieSize = 0;
@@ -29,7 +30,6 @@ export class AppController {
     if (cookieExists) {
       const content = fs.readFileSync(cookiePath, 'utf-8');
       cookieSize = content.length;
-      // Show first 3 lines to verify valid Netscape format headers (# Netscape HTTP Cookie File)
       cookiePreview = content.split('\n').slice(0, 3).join('\n');
     }
 
@@ -38,12 +38,12 @@ export class AppController {
         '--list-formats',
         '--no-check-certificates',
         '--no-warnings',
-        '--js-runtimes',
-        'node',
-        '--extractor-args',
-        'youtube:player_client=mweb,tv_simply,web_creator',
         targetUrl,
       ];
+
+      if (proxyUrl) {
+        args.push('--proxy', proxyUrl);
+      }
 
       if (cookieExists) {
         args.push('--cookies', cookiePath);
@@ -59,6 +59,7 @@ export class AppController {
       proc.on('close', (code) => {
         resolve({
           exitCode: code,
+          proxyConfigured: Boolean(proxyUrl),
           cookieDiagnostics: {
             cookiePath,
             cookieExists,
@@ -66,7 +67,7 @@ export class AppController {
             cookiePreview,
           },
           stdout: stdout.split('\n').filter(Boolean).slice(-25),
-          stderr: stderr,
+          stderr,
         });
       });
     });

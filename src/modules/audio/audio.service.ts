@@ -127,20 +127,22 @@ export class AudioService {
         tempMp3Out,
       );
 
+      // 3. Spawn yt-dlp with proxy argument
       const ytdlpArgs = [
         '-f',
         'ba/b',
         '--no-playlist',
         '--no-warnings',
         '--no-check-certificates',
-        '--js-runtimes',
-        'node',
-        '--extractor-args',
-        'youtube:player_client=mweb,tv_simply,web_creator',
         '-o',
         '-',
         sanitizedUrl,
       ];
+
+      const proxyUrl = process.env.YOUTUBE_PROXY_URL;
+      if (proxyUrl) {
+        ytdlpArgs.push('--proxy', proxyUrl);
+      }
 
       const cookiePath = process.env.YOUTUBE_COOKIES_PATH || '/tmp/cookies.txt';
       if (fs.existsSync(cookiePath)) {

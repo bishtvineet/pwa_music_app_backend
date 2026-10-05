@@ -17,6 +17,7 @@ export class YoutubeService {
 
     return new Promise((resolve, reject) => {
       const cookiePath = process.env.YOUTUBE_COOKIES_PATH || '/tmp/cookies.txt';
+      const proxyUrl = process.env.YOUTUBE_PROXY_URL;
 
       const args = [
         '--dump-single-json',
@@ -24,12 +25,13 @@ export class YoutubeService {
         '--no-playlist',
         '--no-warnings',
         '--no-check-certificates',
-        '--js-runtimes',
-        'node',
-        '--extractor-args',
-        'youtube:player_client=mweb,tv_simply,web_creator',
         sanitizedUrl,
       ];
+
+      if (proxyUrl) {
+        this.logger.log(`[PROXY] Routing request through proxy`);
+        args.push('--proxy', proxyUrl);
+      }
 
       if (fs.existsSync(cookiePath)) {
         args.push('--cookies', cookiePath);
@@ -65,7 +67,7 @@ export class YoutubeService {
           if (stderrData.includes('Sign in to confirm you’re not a bot')) {
             return reject(
               new BadRequestException(
-                'YouTube bot detection triggered. Cookies are required to access this video.',
+                'YouTube bot detection triggered. Cookies or residential proxy required.',
               ),
             );
           }
@@ -85,7 +87,7 @@ export class YoutubeService {
           if (durationInSeconds > MAX_DURATION_SECONDS) {
             return reject(
               new BadRequestException(
-                `Video duration exceeds maximum allowed limit of ${MAX_DURATION_SECONDS / 60} minutes.`,
+                `Video duration exceeds limit of ${MAX_DURATION_SECONDS / 60} minutes.`,
               ),
             );
           }
