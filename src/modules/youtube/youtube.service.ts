@@ -24,9 +24,10 @@ export class YoutubeService {
         '--no-playlist',
         '--no-warnings',
         '--no-check-certificates',
-        // Force yt-dlp to use mobile app APIs (android/ios) which provide real audio streams
+        '--js-runtimes',
+        'node',
         '--extractor-args',
-        'youtube:player_client=android,ios',
+        'youtube:player_client=mweb,tv_simply,web_creator',
         sanitizedUrl,
       ];
 

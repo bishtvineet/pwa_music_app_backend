@@ -38,8 +38,10 @@ export class AppController {
         '--list-formats',
         '--no-check-certificates',
         '--no-warnings',
+        '--js-runtimes',
+        'node',
         '--extractor-args',
-        'youtube:player_client=android,ios',
+        'youtube:player_client=mweb,tv_simply,web_creator',
         targetUrl,
       ];
 
@@ -63,7 +65,7 @@ export class AppController {
             cookieSize,
             cookiePreview,
           },
-          stdout: stdout.split('\n').slice(-20), // Last 20 lines of available formats
+          stdout: stdout.split('\n').filter(Boolean).slice(-25),
           stderr: stderr,
         });
       });

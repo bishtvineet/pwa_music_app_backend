@@ -127,15 +127,16 @@ export class AudioService {
         tempMp3Out,
       );
 
-      // 3. Spawn yt-dlp with android,ios player clients
       const ytdlpArgs = [
         '-f',
         'ba/b',
         '--no-playlist',
         '--no-warnings',
         '--no-check-certificates',
+        '--js-runtimes',
+        'node',
         '--extractor-args',
-        'youtube:player_client=android,ios',
+        'youtube:player_client=mweb,tv_simply,web_creator',
         '-o',
         '-',
         sanitizedUrl,
