@@ -27,7 +27,6 @@ export class AudioService {
     const tempThumbJpg = path.join(os.tmpdir(), `thumb_${timestamp}.jpg`);
     const tempMp3Out = path.join(os.tmpdir(), `output_${timestamp}.mp3`);
 
-    // Clean title for HTTP Content-Disposition header
     const sanitizedFilename = title
       .replace(/[^a-zA-Z0-9_\-\s.]/g, '')
       .trim()
@@ -128,19 +127,21 @@ export class AudioService {
         tempMp3Out,
       );
 
-      // 3. Spawn yt-dlp and ffmpeg processes
+      // 3. Spawn yt-dlp with resilient fallback format
       const ytdlpArgs = [
         '-f',
-        'bestaudio',
+        'ba/b',
         '--no-playlist',
         '--no-warnings',
+        '--no-check-certificates',
         '-o',
         '-',
         sanitizedUrl,
       ];
 
-      if (process.env.YOUTUBE_COOKIES_PATH) {
-        ytdlpArgs.push('--cookies', process.env.YOUTUBE_COOKIES_PATH);
+      const cookiePath = process.env.YOUTUBE_COOKIES_PATH || '/tmp/cookies.txt';
+      if (fs.existsSync(cookiePath)) {
+        ytdlpArgs.push('--cookies', cookiePath);
       }
 
       const ytdlpProc = spawn('yt-dlp', ytdlpArgs);
@@ -155,7 +156,6 @@ export class AudioService {
         this.logger.verbose(`[ffmpeg] ${d.toString().trim()}`),
       );
 
-      // Wait until conversion and tagging complete
       await new Promise<void>((resolve, reject) => {
         ffmpegProc.on('close', (code) => {
           if (code === 0) resolve();
@@ -172,7 +172,6 @@ export class AudioService {
         `attachment; filename="${filename}"; filename*=UTF-8''${encodedFilename}`,
       );
 
-      // Custom headers for React PWA IndexedDB storage
       res.setHeader('X-Audio-Id', videoId);
       res.setHeader('X-Audio-Title', encodeURIComponent(title));
       res.setHeader('X-Audio-Artist', encodeURIComponent(channel));

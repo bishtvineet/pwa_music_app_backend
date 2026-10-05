@@ -5,6 +5,7 @@ import {
   Logger,
 } from '@nestjs/common';
 import { spawn } from 'child_process';
+import * as fs from 'fs';
 import { VideoInfoDto } from './dto/video-info.dto';
 
 @Injectable()
@@ -15,21 +16,20 @@ export class YoutubeService {
     this.logger.debug(`[TESTING] Extracting metadata for: ${sanitizedUrl}`);
 
     return new Promise((resolve, reject) => {
-      // yt-dlp arguments for JSON extraction only
       const args = [
         '--dump-single-json',
         '--no-playlist',
         '--no-warnings',
-        '--prefer-free-formats',
+        '--no-check-certificates',
         sanitizedUrl,
       ];
 
-      // Safe access to global Node process.env
-      if (process.env.YOUTUBE_COOKIES_PATH) {
-        args.push('--cookies', process.env.YOUTUBE_COOKIES_PATH);
+      // Auto-detect cookies from env or file path
+      const cookiePath = process.env.YOUTUBE_COOKIES_PATH || '/tmp/cookies.txt';
+      if (fs.existsSync(cookiePath)) {
+        args.push('--cookies', cookiePath);
       }
 
-      // Renamed from 'process' to 'childProcess' to prevent shadowing global process
       const childProcess = spawn('yt-dlp', args);
 
       let stdoutData = '';
@@ -48,8 +48,13 @@ export class YoutubeService {
           this.logger.error(`[TESTING] yt-dlp failed with exit code: ${code}`);
           this.logger.error(`[TESTING] yt-dlp stderr: ${stderrData}`);
 
-          if (stderrData.includes('Video unavailable') || stderrData.includes('Private video')) {
-            return reject(new BadRequestException('Video is unavailable, private, or deleted.'));
+          if (
+            stderrData.includes('Video unavailable') ||
+            stderrData.includes('Private video')
+          ) {
+            return reject(
+              new BadRequestException('Video is unavailable, private, or deleted.'),
+            );
           }
 
           if (stderrData.includes('Sign in to confirm you’re not a bot')) {
@@ -61,16 +66,17 @@ export class YoutubeService {
           }
 
           return reject(
-            new InternalServerErrorException('Failed to retrieve video metadata from YouTube.'),
+            new InternalServerErrorException(
+              `Failed to retrieve video metadata from YouTube: ${stderrData.slice(0, 200)}`,
+            ),
           );
         }
 
         try {
           const rawInfo = JSON.parse(stdoutData);
-
           const durationInSeconds = Number(rawInfo.duration) || 0;
 
-          // Reject excessively long videos to preserve Render memory/CPU
+          // Reject excessively long videos to preserve Render free tier limits
           const MAX_DURATION_SECONDS = 1800; // 30 minutes
           if (durationInSeconds > MAX_DURATION_SECONDS) {
             this.logger.warn(
@@ -93,20 +99,24 @@ export class YoutubeService {
             originalUrl: sanitizedUrl,
           };
 
-          this.logger.debug(`[TESTING] Successfully extracted metadata for: "${metadata.title}"`);
           this.logger.debug(
-            `[TESTING] Duration: ${metadata.durationFormatted}, Channel: ${metadata.channel}`,
+            `[TESTING] Successfully extracted metadata for: "${metadata.title}"`,
           );
 
           resolve(metadata);
         } catch (parseError) {
           this.logger.error('[TESTING] Failed to parse yt-dlp JSON output', parseError);
-          reject(new InternalServerErrorException('Failed to parse video metadata response.'));
+          reject(
+            new InternalServerErrorException('Failed to parse video metadata response.'),
+          );
         }
       });
 
       childProcess.on('error', (err) => {
-        this.logger.error('[TESTING] Failed to spawn yt-dlp process. Is yt-dlp installed?', err);
+        this.logger.error(
+          '[TESTING] Failed to spawn yt-dlp process. Is yt-dlp installed?',
+          err,
+        );
         reject(
           new InternalServerErrorException(
             'yt-dlp binary is missing or not executable on the host system.',

@@ -1,12 +1,33 @@
 import { NestFactory } from '@nestjs/core';
 import { AppModule } from './app.module';
 import { ValidationPipe, LogLevel } from '@nestjs/common';
+import * as fs from 'fs';
 
 async function bootstrap() {
-  const isProduction = process.env.NODE_ENV === 'production';
+  // Ensure cookies exist if passed via environment variable
+  const cookiePath = '/tmp/cookies.txt';
+  if (process.env.YOUTUBE_COOKIES_BASE64 && !fs.existsSync(cookiePath)) {
+    try {
+      const decodedCookies = Buffer.from(
+        process.env.YOUTUBE_COOKIES_BASE64,
+        'base64',
+      ).toString('utf-8');
+      fs.writeFileSync(cookiePath, decodedCookies);
+      process.env.YOUTUBE_COOKIES_PATH = cookiePath;
+      console.log(
+        `[BOOT] Decoded YouTube cookies to ${cookiePath} (${decodedCookies.length} bytes)`,
+      );
+    } catch (err: any) {
+      console.error('[BOOT] Failed to write decoded cookies:', err.message);
+    }
+  } else if (fs.existsSync(cookiePath)) {
+    process.env.YOUTUBE_COOKIES_PATH = cookiePath;
+    console.log(`[BOOT] Existing cookie file detected at ${cookiePath}`);
+  } else {
+    console.warn('[BOOT] No cookies configured. Proceeding without authentication.');
+  }
 
-  // In production (Render): only show errors, warnings, and standard app logs
-  // In development: include 'debug' and 'verbose' logs
+  const isProduction = process.env.NODE_ENV === 'production';
   const logLevels: LogLevel[] = isProduction
     ? ['error', 'warn', 'log']
     : ['error', 'warn', 'log', 'debug', 'verbose'];
@@ -15,12 +36,13 @@ async function bootstrap() {
     logger: logLevels,
   });
 
-  // Enable CORS with exposed headers so React's fetch() can read custom metadata
+  // Enable CORS and expose custom headers so React fetch() can read them
   app.enableCors({
     origin: '*',
     methods: 'GET,HEAD,PUT,PATCH,POST,DELETE,OPTIONS',
     exposedHeaders: [
       'Content-Disposition',
+      'X-Audio-Id',
       'X-Audio-Title',
       'X-Audio-Artist',
       'X-Audio-Duration',
@@ -28,7 +50,6 @@ async function bootstrap() {
     ],
   });
 
-  // Automatically validate and transform incoming payload DTOs
   app.useGlobalPipes(
     new ValidationPipe({
       whitelist: true,
@@ -39,6 +60,6 @@ async function bootstrap() {
 
   const port = process.env.PORT || 3001;
   await app.listen(port, '0.0.0.0');
-  console.log(`running: ${port}`);
+  console.log(`Server running on port ${port}`);
 }
 bootstrap();

@@ -1,10 +1,18 @@
-import { Controller, Post, Body, Res, Logger } from '@nestjs/common';
+import {
+  Controller,
+  Post,
+  Body,
+  Res,
+  Logger,
+  HttpCode,
+  HttpStatus,
+} from '@nestjs/common';
 import { Response } from 'express';
-import { ConvertRequestDto } from './dto/convert-request.dto';
-import { YoutubeUrlPipe } from '../../common/pipes/youtube-url.pipe';
 import { YoutubeService } from '../youtube/youtube.service';
 import { AudioService } from '../audio/audio.service';
+import { ConvertRequestDto } from './dto/convert-request.dto';
 import { VideoInfoDto } from '../youtube/dto/video-info.dto';
+import { YoutubeUrlPipe } from '../../common/pipes/youtube-url.pipe';
 
 @Controller('converter')
 export class ConverterController {
@@ -16,6 +24,7 @@ export class ConverterController {
   ) {}
 
   @Post('info')
+  @HttpCode(HttpStatus.OK)
   async getVideoInfo(
     @Body('url', YoutubeUrlPipe) sanitizedUrl: string,
     // eslint-disable-next-line @typescript-eslint/no-unused-vars
