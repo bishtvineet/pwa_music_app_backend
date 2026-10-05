@@ -20,23 +20,18 @@ export class YoutubeService {
 
       const args = [
         '--dump-single-json',
+        '--skip-download',
         '--no-playlist',
         '--no-warnings',
         '--no-check-certificates',
-        // Instruct yt-dlp to use mobile player APIs which do not enforce the same datacenter stream blocks
+        // Force yt-dlp to use mobile app APIs (android/ios) which provide real audio streams
         '--extractor-args',
-        'youtube:player_client=android,web',
-        // Fallback format selector so metadata extraction does not demand a specific web profile
-        '-f',
-        'ba/b',
+        'youtube:player_client=android,ios',
         sanitizedUrl,
       ];
 
       if (fs.existsSync(cookiePath)) {
-        this.logger.log(`[COOKIE-CHECK] Using cookies from ${cookiePath} (${fs.statSync(cookiePath).size} bytes)`);
         args.push('--cookies', cookiePath);
-      } else {
-        this.logger.warn(`[COOKIE-CHECK] No cookie file found at ${cookiePath}`);
       }
 
       const childProcess = spawn('yt-dlp', args);
@@ -76,7 +71,7 @@ export class YoutubeService {
 
           return reject(
             new InternalServerErrorException(
-              `Failed to retrieve video metadata from YouTube: ${stderrData.slice(0, 200)}`,
+              `Failed to retrieve video metadata: ${stderrData.slice(0, 200)}`,
             ),
           );
         }
@@ -87,9 +82,6 @@ export class YoutubeService {
 
           const MAX_DURATION_SECONDS = 1800; // 30 minutes
           if (durationInSeconds > MAX_DURATION_SECONDS) {
-            this.logger.warn(
-              `[TESTING] Video exceeds max allowed length: ${durationInSeconds}s > ${MAX_DURATION_SECONDS}s`,
-            );
             return reject(
               new BadRequestException(
                 `Video duration exceeds maximum allowed limit of ${MAX_DURATION_SECONDS / 60} minutes.`,
@@ -108,12 +100,12 @@ export class YoutubeService {
           };
 
           this.logger.debug(
-            `[TESTING] Successfully extracted metadata for: "${metadata.title}"`,
+            `[TESTING] Extracted metadata: "${metadata.title}" (${metadata.durationFormatted})`,
           );
 
           resolve(metadata);
         } catch (parseError) {
-          this.logger.error('[TESTING] Failed to parse yt-dlp JSON output', parseError);
+          this.logger.error('[TESTING] Failed to parse yt-dlp output', parseError);
           reject(
             new InternalServerErrorException('Failed to parse video metadata response.'),
           );
@@ -121,14 +113,9 @@ export class YoutubeService {
       });
 
       childProcess.on('error', (err) => {
-        this.logger.error(
-          '[TESTING] Failed to spawn yt-dlp process. Is yt-dlp installed?',
-          err,
-        );
+        this.logger.error('[TESTING] Failed to spawn yt-dlp', err);
         reject(
-          new InternalServerErrorException(
-            'yt-dlp binary is missing or not executable on the host system.',
-          ),
+          new InternalServerErrorException('yt-dlp binary is missing or not executable.'),
         );
       });
     });

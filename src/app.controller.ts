@@ -38,6 +38,8 @@ export class AppController {
         '--list-formats',
         '--no-check-certificates',
         '--no-warnings',
+        '--extractor-args',
+        'youtube:player_client=android,ios',
         targetUrl,
       ];
 
