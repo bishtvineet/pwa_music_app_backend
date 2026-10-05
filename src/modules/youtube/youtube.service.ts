@@ -16,20 +16,27 @@ export class YoutubeService {
     this.logger.debug(`[TESTING] Extracting metadata for: ${sanitizedUrl}`);
 
     return new Promise((resolve, reject) => {
+      const cookiePath = process.env.YOUTUBE_COOKIES_PATH || '/tmp/cookies.txt';
+
       const args = [
         '--dump-single-json',
         '--no-playlist',
         '--no-warnings',
         '--no-check-certificates',
-        // Force yt-dlp to query mobile player clients, bypassing datacenter format restrictions
+        // Instruct yt-dlp to use mobile player APIs which do not enforce the same datacenter stream blocks
         '--extractor-args',
         'youtube:player_client=android,web',
+        // Fallback format selector so metadata extraction does not demand a specific web profile
+        '-f',
+        'ba/b',
         sanitizedUrl,
       ];
 
-      const cookiePath = process.env.YOUTUBE_COOKIES_PATH || '/tmp/cookies.txt';
       if (fs.existsSync(cookiePath)) {
+        this.logger.log(`[COOKIE-CHECK] Using cookies from ${cookiePath} (${fs.statSync(cookiePath).size} bytes)`);
         args.push('--cookies', cookiePath);
+      } else {
+        this.logger.warn(`[COOKIE-CHECK] No cookie file found at ${cookiePath}`);
       }
 
       const childProcess = spawn('yt-dlp', args);
