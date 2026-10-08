@@ -58,41 +58,13 @@ export class AudioService {
     res.setHeader('X-Audio-Duration', duration ? String(duration) : '0');
     res.setHeader('X-Audio-Thumbnail', encodeURIComponent(thumbnailUrl || ''));
 
-    // If we have a direct stream URL from Piped/Cobalt, feed directly into FFmpeg
-    if (directStreamUrl) {
-      this.logger.log(`[STREAM] Feeding direct audio stream into FFmpeg`);
-      const ffmpegArgs = [
-        '-reconnect', '1',
-        '-reconnect_streamed', '1',
-        '-reconnect_delay_max', '5',
-        '-i', directStreamUrl,
-        '-vn',
-        '-c:a', 'libmp3lame',
-        '-b:a', '128k',
-        '-id3v2_version', '3',
-        '-metadata', `title=${title}`,
-        '-metadata', `artist=${channel}`,
-        '-f', 'mp3',
-        'pipe:1',
-      ];
-
-      const ffmpegProc = spawn('ffmpeg', ffmpegArgs);
-      res.on('close', () => {
-        try { ffmpegProc.kill('SIGTERM'); } catch (_) {}
-      });
-
-      ffmpegProc.stdout.pipe(res);
-      return;
-    }
-
-    // yt-dlp -> FFmpeg pipeline with proxy support
     const cookiePath = this.getValidCookiePath();
     const activeProxy = this.proxyManager.getCurrentProxy() || process.env.YOUTUBE_PROXY_URL;
 
     if (activeProxy) {
       this.logger.log(`[STREAM] Streaming via proxy: ${this.proxyManager.maskProxy(activeProxy)} -> FFmpeg`);
     } else {
-      this.logger.log(`[STREAM] Streaming via direct local yt-dlp -> FFmpeg`);
+      this.logger.log(`[STREAM] Streaming via direct connection -> FFmpeg`);
     }
 
     const ytdlpArgs = [
@@ -129,13 +101,69 @@ export class AudioService {
     const ytdlpProc = spawn('yt-dlp', ytdlpArgs);
     const ffmpegProc = spawn('ffmpeg', ffmpegArgs);
 
-    const killProcs = () => {
+    let isCleanedUp = false;
+    const cleanup = (reason: string) => {
+      if (isCleanedUp) return;
+      isCleanedUp = true;
+
       try { ytdlpProc.kill('SIGTERM'); } catch (_) {}
       try { ffmpegProc.kill('SIGTERM'); } catch (_) {}
+
+      if (!res.writableEnded) {
+        res.end();
+      }
     };
 
-    res.on('close', killProcs);
+    // Prevent unhandled EPIPE crashes across all process streams
+    ytdlpProc.stdout.on('error', (err: any) => {
+      if (err.code !== 'EPIPE') this.logger.warn(`ytdlp stdout: ${err.message}`);
+      cleanup('ytdlp stdout error');
+    });
 
+    ffmpegProc.stdin.on('error', (err: any) => {
+      if (err.code !== 'EPIPE') this.logger.warn(`ffmpeg stdin: ${err.message}`);
+      cleanup('ffmpeg stdin error');
+    });
+
+    ffmpegProc.stdout.on('error', (err: any) => {
+      if (err.code !== 'EPIPE') this.logger.warn(`ffmpeg stdout: ${err.message}`);
+      cleanup('ffmpeg stdout error');
+    });
+
+    ytdlpProc.on('error', (err) => {
+      this.logger.error(`yt-dlp spawn failure: ${err.message}`);
+      cleanup('ytdlp spawn error');
+    });
+
+    ffmpegProc.on('error', (err) => {
+      this.logger.error(`ffmpeg spawn failure: ${err.message}`);
+      cleanup('ffmpeg spawn error');
+    });
+
+    let ytdlpStderr = '';
+    ytdlpProc.stderr.on('data', (d) => {
+      ytdlpStderr += d.toString();
+    });
+
+    ytdlpProc.on('close', (code) => {
+      if (code !== 0) {
+        this.logger.warn(`[STREAM INTERRUPTED] yt-dlp exited with code ${code}. Auto-ejecting proxy.`);
+        if (activeProxy) {
+          this.proxyManager.markProxyAsFailed(activeProxy);
+        }
+        cleanup('ytdlp exited with error');
+      }
+    });
+
+    ffmpegProc.on('close', () => {
+      cleanup('ffmpeg finished');
+    });
+
+    res.on('close', () => {
+      cleanup('client disconnected');
+    });
+
+    // Pipe the audio safely
     ytdlpProc.stdout.pipe(ffmpegProc.stdin);
     ffmpegProc.stdout.pipe(res);
   }
