@@ -12,12 +12,56 @@ import { VideoInfoDto } from './dto/video-info.dto';
 export class YoutubeService {
   private readonly logger = new Logger(YoutubeService.name);
 
-  async getVideoMetadata(sanitizedUrl: string): Promise<VideoInfoDto> {
-    this.logger.debug(`[TESTING] Extracting metadata for: ${sanitizedUrl}`);
+  private getValidCookiePath(): string | null {
+    const candidatePath =
+      process.env.YOUTUBE_COOKIES_PATH || '/tmp/cookies.txt';
+    const writeablePath = '/tmp/runtime_cookies.txt';
 
+    try {
+      if (fs.existsSync(candidatePath)) {
+        const stats = fs.statSync(candidatePath);
+        if (stats.size > 50) {
+          fs.copyFileSync(candidatePath, writeablePath);
+          return writeablePath;
+        }
+      }
+    } catch (err: any) {
+      this.logger.warn(`Could not verify cookie file: ${err?.message}`);
+    }
+
+    return null;
+  }
+
+  async getVideoMetadata(sanitizedUrl: string): Promise<VideoInfoDto> {
+    this.logger.debug(`[METADATA] Extracting metadata for: ${sanitizedUrl}`);
+
+    // Try fast anonymous flat extraction first (bypasses auth/reload bugs)
+    try {
+      return await this.executeYtDlpMetadata(sanitizedUrl, false);
+    } catch (primaryErr: any) {
+      const errMsg = primaryErr?.message || '';
+      // If the track is age-restricted or private, retry with cookies
+      if (
+        errMsg.includes('Sign in') ||
+        errMsg.includes('Private') ||
+        errMsg.includes('bot')
+      ) {
+        this.logger.warn(
+          `[METADATA] Anonymous extraction required authentication. Retrying with session cookies...`,
+        );
+        return await this.executeYtDlpMetadata(sanitizedUrl, true);
+      }
+      throw primaryErr;
+    }
+  }
+
+  private executeYtDlpMetadata(
+    sanitizedUrl: string,
+    useCookies: boolean,
+  ): Promise<VideoInfoDto> {
     return new Promise((resolve, reject) => {
-      const cookiePath = process.env.YOUTUBE_COOKIES_PATH || '/tmp/cookies.txt';
       const proxyUrl = process.env.YOUTUBE_PROXY_URL;
+      const cookiePath = useCookies ? this.getValidCookiePath() : null;
 
       const args = [
         '--dump-single-json',
@@ -25,16 +69,22 @@ export class YoutubeService {
         '--no-playlist',
         '--no-warnings',
         '--no-check-certificates',
+        // Extract top-level metadata without probing video/audio formats
+        '--flat-playlist',
         sanitizedUrl,
       ];
 
       if (proxyUrl) {
-        this.logger.log(`[PROXY] Routing request through proxy`);
         args.push('--proxy', proxyUrl);
       }
 
-      if (fs.existsSync(cookiePath)) {
-        args.push('--cookies', cookiePath);
+      if (cookiePath) {
+        args.push(
+          '--cookies',
+          cookiePath,
+          '--extractor-args',
+          'youtube:player_client=default,web_embedded',
+        );
       }
 
       const childProcess = spawn('yt-dlp', args);
@@ -52,22 +102,16 @@ export class YoutubeService {
 
       childProcess.on('close', (code) => {
         if (code !== 0) {
-          this.logger.error(`[TESTING] yt-dlp failed with exit code: ${code}`);
-          this.logger.error(`[TESTING] yt-dlp stderr: ${stderrData}`);
+          this.logger.error(`[METADATA] yt-dlp exit code: ${code}`);
+          this.logger.error(`[METADATA] yt-dlp stderr: ${stderrData}`);
 
           if (
             stderrData.includes('Video unavailable') ||
             stderrData.includes('Private video')
           ) {
             return reject(
-              new BadRequestException('Video is unavailable, private, or deleted.'),
-            );
-          }
-
-          if (stderrData.includes('Sign in to confirm you’re not a bot')) {
-            return reject(
               new BadRequestException(
-                'YouTube bot detection triggered. Cookies or residential proxy required.',
+                'Video is unavailable, private, or deleted.',
               ),
             );
           }
@@ -83,42 +127,51 @@ export class YoutubeService {
           const rawInfo = JSON.parse(stdoutData);
           const durationInSeconds = Number(rawInfo.duration) || 0;
 
-          const MAX_DURATION_SECONDS = 1800; // 30 minutes
-          if (durationInSeconds > MAX_DURATION_SECONDS) {
-            return reject(
-              new BadRequestException(
-                `Video duration exceeds limit of ${MAX_DURATION_SECONDS / 60} minutes.`,
-              ),
-            );
+          // Resolve best available thumbnail from flat playlist output
+          let thumbnail = rawInfo.thumbnail || '';
+          if (!thumbnail && Array.isArray(rawInfo.thumbnails) && rawInfo.thumbnails.length > 0) {
+            thumbnail = rawInfo.thumbnails[rawInfo.thumbnails.length - 1]?.url || '';
           }
 
           const metadata: VideoInfoDto = {
             id: rawInfo.id,
             title: rawInfo.title,
-            channel: rawInfo.uploader || rawInfo.channel || 'Unknown Artist',
+            channel:
+              rawInfo.uploader ||
+              rawInfo.channel ||
+              rawInfo.artist ||
+              'Unknown Artist',
             duration: durationInSeconds,
             durationFormatted: this.formatDuration(durationInSeconds),
-            thumbnail: rawInfo.thumbnail || '',
+            thumbnail,
             originalUrl: sanitizedUrl,
+            streamM4aUrl: `/converter/stream/${rawInfo.id}`,
           };
 
           this.logger.debug(
-            `[TESTING] Extracted metadata: "${metadata.title}" (${metadata.durationFormatted})`,
+            `[METADATA] Extracted successfully: "${metadata.title}" (${metadata.durationFormatted})`,
           );
 
           resolve(metadata);
         } catch (parseError) {
-          this.logger.error('[TESTING] Failed to parse yt-dlp output', parseError);
+          this.logger.error(
+            '[METADATA] Failed to parse yt-dlp JSON output',
+            parseError,
+          );
           reject(
-            new InternalServerErrorException('Failed to parse video metadata response.'),
+            new InternalServerErrorException(
+              'Failed to parse video metadata response.',
+            ),
           );
         }
       });
 
       childProcess.on('error', (err) => {
-        this.logger.error('[TESTING] Failed to spawn yt-dlp', err);
+        this.logger.error('[METADATA] Failed to spawn yt-dlp', err);
         reject(
-          new InternalServerErrorException('yt-dlp binary is missing or not executable.'),
+          new InternalServerErrorException(
+            'yt-dlp binary is missing or not executable.',
+          ),
         );
       });
     });

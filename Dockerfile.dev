@@ -1,24 +1,49 @@
-FROM node:20-alpine
+# --- Stage 1: Build & Dependencies ---
+FROM node:20-alpine AS builder
 
 WORKDIR /app
 
-# Install system dependencies: python3, ffmpeg, ca-certificates, and curl
+COPY package*.json ./
+RUN npm ci
+
+COPY . .
+RUN npm run build
+
+# Prune to production-only dependencies
+RUN npm prune --production && npm cache clean --force
+
+# --- Stage 2: Minimal Runtime ---
+FROM node:20-alpine AS runner
+
+WORKDIR /app
+ENV NODE_ENV=production
+
+# 1. Install runtime packages, download yt-dlp, and install PM2 globally
 RUN apk add --no-cache \
     python3 \
     ffmpeg \
     ca-certificates \
-    curl
+    curl \
+    && curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp \
+    && chmod a+rx /usr/local/bin/yt-dlp \
+    && npm install -g pm2 \
+    && apk del curl \
+    && rm -rf /var/cache/apk/*
 
-# Install the standalone yt-dlp binary
-RUN curl -L https://github.com/yt-dlp/yt-dlp/releases/latest/download/yt-dlp -o /usr/local/bin/yt-dlp \
-    && chmod a+rx /usr/local/bin/yt-dlp
+# 2. Copy artifacts from builder
+COPY --from=builder /app/package*.json ./
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/dist ./dist
 
-# Copy package files and install all dependencies (including devDependencies for Nest CLI)
-COPY package*.json ./
-RUN npm install
+# 3. Copy PM2 cluster configuration
+COPY ecosystem.config.js ./
 
-# Expose port
+# 4. Prepare home and working directory permissions for PM2 under non-root 'node' user
+RUN mkdir -p /home/node/.pm2 && chown -R node:node /home/node/.pm2 /app
+
+USER node
+
 EXPOSE 3001
 
-# Start NestJS in watch mode for hot-reload
-CMD ["npm", "run", "start:dev"]
+# 5. Use pm2-runtime to keep container running in foreground and manage cluster
+CMD ["pm2-runtime", "start", "ecosystem.config.js"]

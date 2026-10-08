@@ -1,4 +1,10 @@
-import { IsNotEmpty, IsString, IsUrl } from 'class-validator';
+import {
+  IsNotEmpty,
+  IsString,
+  IsUrl,
+  IsOptional,
+  IsNumber,
+} from 'class-validator';
 
 export class ConvertRequestDto {
   @IsNotEmpty({ message: 'YouTube URL is required' })
@@ -8,4 +14,24 @@ export class ConvertRequestDto {
     { message: 'Please provide a valid URL with protocol (http/https)' },
   )
   url!: string;
+
+  @IsOptional()
+  @IsString()
+  id?: string;
+
+  @IsOptional()
+  @IsString()
+  title?: string;
+
+  @IsOptional()
+  @IsString()
+  channel?: string;
+
+  @IsOptional()
+  @IsString()
+  thumbnail?: string;
+
+  @IsOptional()
+  @IsNumber()
+  duration?: number;
 }

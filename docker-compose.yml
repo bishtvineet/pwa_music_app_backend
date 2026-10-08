@@ -9,11 +9,11 @@ services:
     ports:
       - '3001:3001'
     volumes:
-      # Mount current code directory into container for hot-reload
       - .:/app
-      # Prevent host node_modules from overwriting container's node_modules
+      - ./cookies.txt:/tmp/cookies.txt
       - /app/node_modules
     environment:
       - NODE_ENV=development
       - PORT=3001
+      - YOUTUBE_COOKIES_PATH=/tmp/cookies.txt
     restart: unless-stopped

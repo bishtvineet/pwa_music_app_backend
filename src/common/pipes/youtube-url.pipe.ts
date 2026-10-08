@@ -8,13 +8,6 @@ import {
 @Injectable()
 export class YoutubeUrlPipe implements PipeTransform<string, string> {
   private readonly logger = new Logger(YoutubeUrlPipe.name);
-
-  // Regex handles:
-  // - https://www.youtube.com/watch?v=VIDEO_ID
-  // - https://youtu.be/VIDEO_ID
-  // - https://www.youtube.com/shorts/VIDEO_ID
-  // - https://m.youtube.com/watch?v=VIDEO_ID
-  // - Query strings like ?si=..., &t=..., &feature=share
   private readonly youtubeRegex =
     /(?:https?:\/\/)?(?:www\.|m\.)?(?:youtube\.com\/(?:watch\?(?:.*&)?v=|shorts\/)|youtu\.be\/)([a-zA-Z0-9_-]{11})/;
 

@@ -6,4 +6,5 @@ export class VideoInfoDto {
   durationFormatted!: string; // e.g. "03:45"
   thumbnail!: string;
   originalUrl!: string;
+  streamM4aUrl?: string; // Optional non-breaking addition
 }
