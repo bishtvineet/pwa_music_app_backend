@@ -7,16 +7,81 @@ import {
 import { spawn } from 'child_process';
 import * as fs from 'fs';
 import { VideoInfoDto } from './dto/video-info.dto';
+import { ProxyManagerService } from './proxy-manager.service';
+
+interface CircuitState {
+  isYtDlpBlocked: boolean;
+  blockedAt: number | null;
+}
 
 @Injectable()
 export class YoutubeService {
   private readonly logger = new Logger(YoutubeService.name);
 
-  private getValidCookiePath(): string | null {
-    const candidatePath =
-      process.env.YOUTUBE_COOKIES_PATH || '/tmp/cookies.txt';
-    const writeablePath = '/tmp/runtime_cookies.txt';
+  // Laptop Proxy Configuration (set LAPTOP_BACKEND_URL in Render env)
+  private readonly laptopUrl = process.env.LAPTOP_BACKEND_URL?.replace(/\/$/, '') || '';
+  private isLaptopOnline = false;
 
+  private circuit: CircuitState = {
+    isYtDlpBlocked: false,
+    blockedAt: null,
+  };
+
+  private readonly CIRCUIT_RESET_MS = 30 * 60 * 1000;
+
+  constructor(private readonly proxyManager: ProxyManagerService) {
+    if (this.laptopUrl) {
+      this.checkLaptopHealth();
+      setInterval(() => this.checkLaptopHealth(), 2 * 60 * 1000);
+    }
+  }
+
+  async checkLaptopHealth(): Promise<boolean> {
+    if (!this.laptopUrl) {
+      this.isLaptopOnline = false;
+      return false;
+    }
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 2000);
+      const res = await fetch(`${this.laptopUrl}/health`, { signal: controller.signal });
+      clearTimeout(timer);
+      this.isLaptopOnline = res.ok;
+      return res.ok;
+    } catch {
+      this.isLaptopOnline = false;
+      return false;
+    }
+  }
+
+  public getLaptopStatus() {
+    return {
+      configured: Boolean(this.laptopUrl),
+      online: this.isLaptopOnline,
+      url: this.laptopUrl,
+    };
+  }
+
+  public resetCircuit(reason: string = 'Manual trigger'): void {
+    this.circuit = { isYtDlpBlocked: false, blockedAt: null };
+    this.logger.log(`[CIRCUIT] Local yt-dlp circuit reset. Reason: ${reason}`);
+  }
+
+  public extractVideoId(url: string): string {
+    const match = url.match(/(?:v=|\/shorts\/|youtu\.be\/)([a-zA-Z0-9_-]{11})/);
+    if (!match) throw new BadRequestException('Invalid YouTube URL');
+    return match[1];
+  }
+
+  private formatDuration(seconds: number): string {
+    const mins = Math.floor(seconds / 60);
+    const secs = seconds % 60;
+    return `${String(mins).padStart(2, '0')}:${String(secs).padStart(2, '0')}`;
+  }
+
+  private getValidCookiePath(): string | null {
+    const candidatePath = process.env.YOUTUBE_COOKIES_PATH || '/tmp/cookies.txt';
+    const writeablePath = '/tmp/runtime_cookies.txt';
     try {
       if (fs.existsSync(candidatePath)) {
         const stats = fs.statSync(candidatePath);
@@ -26,41 +91,78 @@ export class YoutubeService {
         }
       }
     } catch (err: any) {
-      this.logger.warn(`Could not verify cookie file: ${err?.message}`);
+      this.logger.warn(`Cookie check error: ${err?.message}`);
     }
-
     return null;
   }
 
-  async getVideoMetadata(sanitizedUrl: string): Promise<VideoInfoDto> {
-    this.logger.debug(`[METADATA] Extracting metadata for: ${sanitizedUrl}`);
+  // ==========================================
+  // ENGINE 1: YouTube Official oEmbed (Cloud Safe, Never Blocked)
+  // ==========================================
+  async extractViaOembed(videoId: string, originalUrl: string): Promise<VideoInfoDto> {
+    const oembedUrl = `https://www.youtube.com/oembed?url=https://www.youtube.com/watch?v=${videoId}&format=json`;
 
-    // Try fast anonymous flat extraction first (bypasses auth/reload bugs)
-    try {
-      return await this.executeYtDlpMetadata(sanitizedUrl, false);
-    } catch (primaryErr: any) {
-      const errMsg = primaryErr?.message || '';
-      // If the track is age-restricted or private, retry with cookies
-      if (
-        errMsg.includes('Sign in') ||
-        errMsg.includes('Private') ||
-        errMsg.includes('bot')
-      ) {
-        this.logger.warn(
-          `[METADATA] Anonymous extraction required authentication. Retrying with session cookies...`,
-        );
-        return await this.executeYtDlpMetadata(sanitizedUrl, true);
-      }
-      throw primaryErr;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 4000);
+
+    const res = await fetch(oembedUrl, {
+      signal: controller.signal,
+      headers: { Accept: 'application/json' },
+    });
+    clearTimeout(timeout);
+
+    if (!res.ok) {
+      throw new Error(`oEmbed failed with status: ${res.status}`);
     }
+
+    const data: any = await res.json();
+
+    return {
+      id: videoId,
+      title: data.title || 'Unknown Title',
+      channel: data.author_name || 'YouTube Artist',
+      duration: 0,
+      durationFormatted: '--:--',
+      thumbnail: `https://i.ytimg.com/vi/${videoId}/hqdefault.jpg`,
+      originalUrl,
+      streamM4aUrl: `/converter/stream/${videoId}`,
+    };
   }
 
-  private executeYtDlpMetadata(
-    sanitizedUrl: string,
-    useCookies: boolean,
-  ): Promise<VideoInfoDto> {
+  // ==========================================
+  // ENGINE 2: Laptop Relay (Tailscale Funnel)
+  // ==========================================
+  async extractViaLaptop(url: string): Promise<VideoInfoDto> {
+    if (!this.laptopUrl) {
+      throw new BadRequestException('LAPTOP_BACKEND_URL is not configured.');
+    }
+    if (!this.isLaptopOnline) {
+      await this.checkLaptopHealth();
+      if (!this.isLaptopOnline) {
+        throw new BadRequestException('Laptop relay is currently offline or unreachable.');
+      }
+    }
+
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 7000);
+
+    const res = await fetch(`${this.laptopUrl}/converter/info/ytdlp`, {
+      method: 'POST',
+      signal: controller.signal,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ url }),
+    });
+    clearTimeout(timeout);
+
+    if (!res.ok) throw new Error(`Laptop rejected extraction with status ${res.status}`);
+    return (await res.json()) as VideoInfoDto;
+  }
+
+  // ==========================================
+  // Helper: Low-level yt-dlp process spawn
+  // ==========================================
+  private runYtDlpProcess(sanitizedUrl: string, proxyUrl: string | null, useCookies = true): Promise<VideoInfoDto> {
     return new Promise((resolve, reject) => {
-      const proxyUrl = process.env.YOUTUBE_PROXY_URL;
       const cookiePath = useCookies ? this.getValidCookiePath() : null;
 
       const args = [
@@ -69,119 +171,114 @@ export class YoutubeService {
         '--no-playlist',
         '--no-warnings',
         '--no-check-certificates',
-        // Extract top-level metadata without probing video/audio formats
         '--flat-playlist',
         sanitizedUrl,
       ];
 
-      if (proxyUrl) {
-        args.push('--proxy', proxyUrl);
-      }
-
+      if (proxyUrl) args.push('--proxy', proxyUrl);
       if (cookiePath) {
-        args.push(
-          '--cookies',
-          cookiePath,
-          '--extractor-args',
-          'youtube:player_client=default,web_embedded',
-        );
+        args.push('--cookies', cookiePath, '--extractor-args', 'youtube:player_client=android,web');
       }
 
-      const childProcess = spawn('yt-dlp', args);
+      const child = spawn('yt-dlp', args);
+      let stdout = '';
+      let stderr = '';
 
-      let stdoutData = '';
-      let stderrData = '';
+      child.stdout.on('data', (d) => (stdout += d.toString()));
+      child.stderr.on('data', (d) => (stderr += d.toString()));
 
-      childProcess.stdout.on('data', (chunk) => {
-        stdoutData += chunk.toString();
-      });
-
-      childProcess.stderr.on('data', (chunk) => {
-        stderrData += chunk.toString();
-      });
-
-      childProcess.on('close', (code) => {
+      child.on('close', (code) => {
         if (code !== 0) {
-          this.logger.error(`[METADATA] yt-dlp exit code: ${code}`);
-          this.logger.error(`[METADATA] yt-dlp stderr: ${stderrData}`);
-
-          if (
-            stderrData.includes('Video unavailable') ||
-            stderrData.includes('Private video')
-          ) {
-            return reject(
-              new BadRequestException(
-                'Video is unavailable, private, or deleted.',
-              ),
-            );
-          }
-
-          return reject(
-            new InternalServerErrorException(
-              `Failed to retrieve video metadata: ${stderrData.slice(0, 200)}`,
-            ),
-          );
+          return reject(new Error(`yt-dlp failed (code ${code}): ${stderr.slice(0, 150)}`));
         }
 
         try {
-          const rawInfo = JSON.parse(stdoutData);
-          const durationInSeconds = Number(rawInfo.duration) || 0;
-
-          // Resolve best available thumbnail from flat playlist output
-          let thumbnail = rawInfo.thumbnail || '';
-          if (!thumbnail && Array.isArray(rawInfo.thumbnails) && rawInfo.thumbnails.length > 0) {
-            thumbnail = rawInfo.thumbnails[rawInfo.thumbnails.length - 1]?.url || '';
+          const raw = JSON.parse(stdout);
+          const duration = Number(raw.duration) || 0;
+          let thumbnail = raw.thumbnail || '';
+          if (!thumbnail && Array.isArray(raw.thumbnails) && raw.thumbnails.length > 0) {
+            thumbnail = raw.thumbnails[raw.thumbnails.length - 1]?.url || '';
           }
 
-          const metadata: VideoInfoDto = {
-            id: rawInfo.id,
-            title: rawInfo.title,
-            channel:
-              rawInfo.uploader ||
-              rawInfo.channel ||
-              rawInfo.artist ||
-              'Unknown Artist',
-            duration: durationInSeconds,
-            durationFormatted: this.formatDuration(durationInSeconds),
+          resolve({
+            id: raw.id,
+            title: raw.title,
+            channel: raw.uploader || raw.channel || raw.artist || 'Unknown Artist',
+            duration,
+            durationFormatted: this.formatDuration(duration),
             thumbnail,
             originalUrl: sanitizedUrl,
-            streamM4aUrl: `/converter/stream/${rawInfo.id}`,
-          };
-
-          this.logger.debug(
-            `[METADATA] Extracted successfully: "${metadata.title}" (${metadata.durationFormatted})`,
-          );
-
-          resolve(metadata);
-        } catch (parseError) {
-          this.logger.error(
-            '[METADATA] Failed to parse yt-dlp JSON output',
-            parseError,
-          );
-          reject(
-            new InternalServerErrorException(
-              'Failed to parse video metadata response.',
-            ),
-          );
+            streamM4aUrl: `/converter/stream/${raw.id}`,
+          });
+        } catch {
+          reject(new Error('Failed to parse yt-dlp JSON'));
         }
       });
 
-      childProcess.on('error', (err) => {
-        this.logger.error('[METADATA] Failed to spawn yt-dlp', err);
-        reject(
-          new InternalServerErrorException(
-            'yt-dlp binary is missing or not executable.',
-          ),
-        );
-      });
+      child.on('error', (err) => reject(new Error(`yt-dlp spawn error: ${err.message}`)));
     });
   }
 
-  private formatDuration(seconds: number): string {
-    const mins = Math.floor(seconds / 60);
-    const secs = seconds % 60;
-    const formattedMins = String(mins).padStart(2, '0');
-    const formattedSecs = String(secs).padStart(2, '0');
-    return `${formattedMins}:${formattedSecs}`;
+  // ==========================================
+  // ENGINE 3: Resilient yt-dlp (Proxy First -> Direct Fallback)
+  // ==========================================
+  async extractViaYtDlp(sanitizedUrl: string, useCookies = true): Promise<VideoInfoDto> {
+    const activeProxy = this.proxyManager.getCurrentProxy();
+
+    // 1. Try active proxy from pool first
+    if (activeProxy) {
+      try {
+        this.logger.log(`[YT-DLP] Attempting extraction via proxy: ${this.proxyManager.maskProxy(activeProxy)}`);
+        const result = await this.runYtDlpProcess(sanitizedUrl, activeProxy, useCookies);
+        this.logger.log(`[YT-DLP] Proxy extraction succeeded for: ${result.title}`);
+        return result;
+      } catch (proxyErr: any) {
+        this.logger.warn(`[YT-DLP] Proxy failed (${proxyErr.message}). Disabling this proxy.`);
+        // Eject bad proxy permanently
+        this.proxyManager.markProxyAsFailed(activeProxy);
+      }
+    }
+
+    // 2. Direct fallback (Runs if proxy failed OR pool is completely exhausted)
+    const envProxy = process.env.YOUTUBE_PROXY_URL || null;
+    this.logger.log(`[YT-DLP] Running via standard connection (${envProxy ? 'via env proxy' : 'direct local'})...`);
+    return this.runYtDlpProcess(sanitizedUrl, envProxy, useCookies);
+  }
+
+  // ==========================================
+  // MASTER METADATA PIPELINE (Auto Failover)
+  // ==========================================
+  async getVideoMetadata(sanitizedUrl: string): Promise<VideoInfoDto> {
+    const videoId = this.extractVideoId(sanitizedUrl);
+
+    // 1. Try local/proxy yt-dlp (runs when circuit is closed)
+    if (!this.circuit.isYtDlpBlocked) {
+      try {
+        return await this.extractViaYtDlp(sanitizedUrl, true);
+      } catch (err: any) {
+        this.logger.warn(`[METADATA] Local/Proxy yt-dlp failed: ${err.message}`);
+        this.circuit = { isYtDlpBlocked: true, blockedAt: Date.now() };
+      }
+    }
+
+    // 2. Try Laptop Relay if Render has it configured and it's online
+    if (this.laptopUrl && this.isLaptopOnline) {
+      try {
+        this.logger.log(`[METADATA] Routing extraction to Laptop Relay: ${this.laptopUrl}`);
+        return await this.extractViaLaptop(sanitizedUrl);
+      } catch (err: any) {
+        this.logger.warn(`[METADATA] Laptop relay failed: ${err.message}`);
+      }
+    }
+
+    // 3. Failover: Official YouTube oEmbed (Never blocked by cloud IPs)
+    try {
+      this.logger.debug(`[METADATA] Using YouTube oEmbed for: ${videoId}`);
+      return await this.extractViaOembed(videoId, sanitizedUrl);
+    } catch (err: any) {
+      this.logger.error(`[METADATA] oEmbed extraction failed: ${err.message}`);
+    }
+
+    throw new InternalServerErrorException('Unable to retrieve video metadata.');
   }
 }
