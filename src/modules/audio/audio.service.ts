@@ -96,12 +96,13 @@ export class AudioService {
     }
 
     const ytdlpArgs = [
-      '-f', 'ba/b',
-      '-N', '4',
+      '-f', '140/ba[ext=m4a]/ba/b',
       '--no-playlist',
       '--no-warnings',
       '--no-check-certificates',
-      '--buffer-size', '128K',
+      '--buffer-size', '1M',
+      '--http-chunk-size', '10M',
+      '--extractor-args', 'youtube:player_client=android,web',
       '-o', '-',
       sanitizedUrl,
     ];
