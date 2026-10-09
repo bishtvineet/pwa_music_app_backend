@@ -4,7 +4,14 @@ import {
   IsUrl,
   IsOptional,
   IsNumber,
+  IsIn,
 } from 'class-validator';
+
+export type NetworkMode =
+  | 'cloud'
+  | 'laptop-relay'
+  | 'laptop-proxy'
+  | 'laptop-direct';
 
 export class ConvertRequestDto {
   @IsNotEmpty({ message: 'YouTube URL is required' })
@@ -34,4 +41,12 @@ export class ConvertRequestDto {
   @IsOptional()
   @IsNumber()
   duration?: number;
+
+  @IsOptional()
+  @IsString()
+  @IsIn(['cloud', 'laptop-relay', 'laptop-proxy', 'laptop-direct'], {
+    message:
+      'networkMode must be one of: cloud, laptop-relay, laptop-proxy, laptop-direct',
+  })
+  networkMode?: NetworkMode;
 }

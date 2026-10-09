@@ -13,7 +13,7 @@ import {
 import { Response } from 'express';
 import { YoutubeService } from '../youtube/youtube.service';
 import { AudioService } from '../audio/audio.service';
-import { ConvertRequestDto } from './dto/convert-request.dto';
+import { ConvertRequestDto, NetworkMode } from './dto/convert-request.dto';
 import { VideoInfoDto } from '../youtube/dto/video-info.dto';
 import { YoutubeUrlPipe } from '../../common/pipes/youtube-url.pipe';
 import { UpdateCookiesDto } from './dto/update-cookies.dto';
@@ -28,13 +28,14 @@ export class ConverterController {
     private readonly audioService: AudioService,
   ) {}
 
-  // 1. PRIMARY: Master auto-failover endpoint
+  // 1. PRIMARY: Instant oEmbed info endpoint (~200ms)
   @Post('info')
   @HttpCode(HttpStatus.OK)
   async getVideoInfo(
     @Body('url', YoutubeUrlPipe) sanitizedUrl: string,
+    @Body('networkMode') networkMode?: NetworkMode,
   ): Promise<VideoInfoDto> {
-    return this.youtubeService.getVideoMetadata(sanitizedUrl);
+    return this.youtubeService.getVideoMetadata(sanitizedUrl, networkMode);
   }
 
   // 2. DIAGNOSTIC: Test YouTube Official oEmbed directly
@@ -83,6 +84,7 @@ export class ConverterController {
     const id = body?.id || this.youtubeService.extractVideoId(sanitizedUrl);
     const thumbnail = body?.thumbnail || '';
     const duration = body?.duration || 0;
+    const mode: NetworkMode = body?.networkMode || 'cloud';
 
     await this.audioService.streamMp3(
       id,
@@ -92,6 +94,8 @@ export class ConverterController {
       thumbnail,
       duration,
       res,
+      mode,
+      this.youtubeService.getLaptopUrl(),
     );
   }
 
@@ -131,7 +135,10 @@ export class ConverterController {
   ): Promise<{ success: boolean; message: string; byteCount: number }> {
     const content = body.cookies?.trim();
 
-    if (!content || (!content.includes('.youtube.com') && !content.includes('youtube.com'))) {
+    if (
+      !content ||
+      (!content.includes('.youtube.com') && !content.includes('youtube.com'))
+    ) {
       throw new BadRequestException(
         'Invalid format. Must be a valid Netscape-formatted YouTube cookies.txt file containing .youtube.com entries.',
       );
@@ -149,7 +156,8 @@ export class ConverterController {
 
       return {
         success: true,
-        message: 'YouTube cookies successfully updated and circuit breaker reset.',
+        message:
+          'YouTube cookies successfully updated and circuit breaker reset.',
         byteCount: Buffer.byteLength(content),
       };
     } catch (err: any) {

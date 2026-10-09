@@ -2,7 +2,9 @@ import { Injectable, Logger } from '@nestjs/common';
 import { Response } from 'express';
 import { spawn } from 'child_process';
 import * as fs from 'fs';
+import { Readable } from 'stream';
 import { ProxyManagerService } from '../youtube/proxy-manager.service';
+import { NetworkMode } from '../converter/dto/convert-request.dto';
 
 @Injectable()
 export class AudioService {
@@ -11,7 +13,8 @@ export class AudioService {
   constructor(private readonly proxyManager: ProxyManagerService) {}
 
   private getValidCookiePath(): string | null {
-    const candidatePath = process.env.YOUTUBE_COOKIES_PATH || '/tmp/cookies.txt';
+    const candidatePath =
+      process.env.YOUTUBE_COOKIES_PATH || '/tmp/cookies.txt';
     const writeablePath = '/tmp/runtime_cookies.txt';
     try {
       if (fs.existsSync(candidatePath)) {
@@ -27,6 +30,65 @@ export class AudioService {
     return null;
   }
 
+  /**
+   * Relay the MP3 download stream directly from Laptop over Tailscale
+   */
+  private async relayFromLaptop(
+    laptopUrl: string,
+    bodyPayload: any,
+    res: Response,
+  ): Promise<boolean> {
+    try {
+      this.logger.log(
+        `[RELAY] Forwarding download stream to Laptop: ${laptopUrl}/converter/download`,
+      );
+
+      const controller = new AbortController();
+      const response = await fetch(`${laptopUrl}/converter/download`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ ...bodyPayload, networkMode: 'laptop-direct' }),
+        signal: controller.signal,
+      });
+
+      if (!response.ok || !response.body) {
+        this.logger.error(
+          `[RELAY ERROR] Laptop returned status ${response.status}`,
+        );
+        return false;
+      }
+
+      if (res.headersSent) return true;
+
+      res.setHeader(
+        'Content-Type',
+        response.headers.get('content-type') || 'audio/mpeg',
+      );
+      const disposition = response.headers.get('content-disposition');
+      if (disposition) res.setHeader('Content-Disposition', disposition);
+
+      const stream = Readable.fromWeb(response.body as any);
+
+      stream.on('error', (err) => {
+        this.logger.warn(`Relay stream error: ${err.message}`);
+        controller.abort();
+        if (!res.writableEnded) res.end();
+      });
+
+      res.on('close', () => {
+        controller.abort();
+      });
+
+      stream.pipe(res);
+      return true;
+    } catch (err: any) {
+      this.logger.error(
+        `[RELAY EXCEPTION] Failed to stream from laptop: ${err.message}`,
+      );
+      return false;
+    }
+  }
+
   async streamMp3(
     videoId: string,
     sanitizedUrl: string,
@@ -35,9 +97,34 @@ export class AudioService {
     thumbnailUrl: string,
     duration: number,
     res: Response,
-    directStreamUrl?: string,
+    networkMode: NetworkMode = 'cloud',
+    laptopUrl?: string,
   ): Promise<void> {
-    this.logger.debug(`[DOWNLOAD] MP3 stream initiated for: "${title}" (${videoId})`);
+    this.logger.log(
+      `[DOWNLOAD] Stream requested: "${title}" (${videoId}) | Mode: [${networkMode}]`,
+    );
+
+    // MODE 2: Explicit Laptop Relay delegation
+    if (networkMode === 'laptop-relay') {
+      if (laptopUrl) {
+        const success = await this.relayFromLaptop(
+          laptopUrl,
+          {
+            url: sanitizedUrl,
+            title,
+            channel,
+            thumbnail: thumbnailUrl,
+            duration,
+            id: videoId,
+          },
+          res,
+        );
+        if (success) return;
+      }
+      this.logger.warn(
+        `[RELAY] Laptop unavailable. Falling back to local/cloud processing.`,
+      );
+    }
 
     const sanitizedFilename = title
       .replace(/[^a-zA-Z0-9_\-\s.]/g, '')
@@ -58,24 +145,48 @@ export class AudioService {
     res.setHeader('X-Audio-Duration', duration ? String(duration) : '0');
     res.setHeader('X-Audio-Thumbnail', encodeURIComponent(thumbnailUrl || ''));
 
-    const cookiePath = this.getValidCookiePath();
-    const activeProxy = this.proxyManager.getCurrentProxy() || process.env.YOUTUBE_PROXY_URL;
+    // Determine Proxy Usage:
+    // - laptop-direct: activeProxy = null (0 proxies consumed)
+    // - cloud / laptop-proxy: activeProxy = current proxy from pool
+    let activeProxy: string | null = null;
 
-    if (activeProxy) {
-      this.logger.log(`[STREAM] Streaming via proxy: ${this.proxyManager.maskProxy(activeProxy)} -> FFmpeg`);
+    if (networkMode === 'laptop-direct') {
+      this.logger.log(
+        `[STREAM] Mode is LAPTOP-DIRECT: Zero proxy usage. Using local residential connection.`,
+      );
+      activeProxy = null;
     } else {
-      this.logger.log(`[STREAM] Streaming via direct connection -> FFmpeg`);
+      activeProxy =
+        this.proxyManager.getCurrentProxy() ||
+        process.env.YOUTUBE_PROXY_URL ||
+        null;
+      if (activeProxy) {
+        this.logger.log(
+          `[STREAM] Streaming via proxy: ${this.proxyManager.maskProxy(activeProxy)} -> FFmpeg`,
+        );
+      } else {
+        this.logger.log(
+          `[STREAM] Streaming without proxy (Direct connection) -> FFmpeg`,
+        );
+      }
     }
 
+    const cookiePath = this.getValidCookiePath();
+
     const ytdlpArgs = [
-      '-f', '140/ba[ext=m4a]/ba/b',
+      '-f',
+      '140/ba[ext=m4a]/ba/b',
       '--no-playlist',
       '--no-warnings',
       '--no-check-certificates',
-      '--buffer-size', '1M',
-      '--http-chunk-size', '10M',
-      '--extractor-args', 'youtube:player_client=android,web',
-      '-o', '-',
+      '--buffer-size',
+      '1M',
+      '--http-chunk-size',
+      '10M',
+      '--extractor-args',
+      'youtube:player_client=android,web',
+      '-o',
+      '-',
       sanitizedUrl,
     ];
 
@@ -87,14 +198,21 @@ export class AudioService {
     }
 
     const ffmpegArgs = [
-      '-i', 'pipe:0',
+      '-i',
+      'pipe:0',
       '-vn',
-      '-c:a', 'libmp3lame',
-      '-b:a', '128k',
-      '-id3v2_version', '3',
-      '-metadata', `title=${title}`,
-      '-metadata', `artist=${channel}`,
-      '-f', 'mp3',
+      '-c:a',
+      'libmp3lame',
+      '-b:a',
+      '128k',
+      '-id3v2_version',
+      '3',
+      '-metadata',
+      `title=${title}`,
+      '-metadata',
+      `artist=${channel}`,
+      '-f',
+      'mp3',
       'pipe:1',
     ];
 
@@ -106,15 +224,18 @@ export class AudioService {
       if (isCleanedUp) return;
       isCleanedUp = true;
 
-      try { ytdlpProc.kill('SIGTERM'); } catch (_) {}
-      try { ffmpegProc.kill('SIGTERM'); } catch (_) {}
+      try {
+        ytdlpProc.kill('SIGTERM');
+      } catch (_) {}
+      try {
+        ffmpegProc.kill('SIGTERM');
+      } catch (_) {}
 
       if (!res.writableEnded) {
         res.end();
       }
     };
 
-    // Prevent unhandled EPIPE crashes across all process streams
     ytdlpProc.stdout.on('error', (err: any) => {
       if (err.code !== 'EPIPE') this.logger.warn(`ytdlp stdout: ${err.message}`);
       cleanup('ytdlp stdout error');
@@ -126,7 +247,8 @@ export class AudioService {
     });
 
     ffmpegProc.stdout.on('error', (err: any) => {
-      if (err.code !== 'EPIPE') this.logger.warn(`ffmpeg stdout: ${err.message}`);
+      if (err.code !== 'EPIPE')
+        this.logger.warn(`ffmpeg stdout: ${err.message}`);
       cleanup('ffmpeg stdout error');
     });
 
@@ -140,17 +262,35 @@ export class AudioService {
       cleanup('ffmpeg spawn error');
     });
 
-    let ytdlpStderr = '';
-    ytdlpProc.stderr.on('data', (d) => {
-      ytdlpStderr += d.toString();
-    });
-
-    ytdlpProc.on('close', (code) => {
+    ytdlpProc.on('close', async (code) => {
       if (code !== 0) {
-        this.logger.warn(`[STREAM INTERRUPTED] yt-dlp exited with code ${code}. Auto-ejecting proxy.`);
+        this.logger.warn(`[STREAM INTERRUPTED] yt-dlp exited with code ${code}.`);
+
         if (activeProxy) {
           this.proxyManager.markProxyAsFailed(activeProxy);
         }
+
+        // MODE 1 FAILOVER: If running on Render and proxy fails, failover to Laptop Relay
+        if (networkMode === 'cloud' && laptopUrl && !res.headersSent) {
+          this.logger.log(
+            `[STREAM FAILOVER] Proxy failed on cloud. Delegating to Laptop Relay.`,
+          );
+          cleanup('failover to laptop');
+          await this.relayFromLaptop(
+            laptopUrl,
+            {
+              url: sanitizedUrl,
+              title,
+              channel,
+              thumbnail: thumbnailUrl,
+              duration,
+              id: videoId,
+            },
+            res,
+          );
+          return;
+        }
+
         cleanup('ytdlp exited with error');
       }
     });
@@ -163,7 +303,6 @@ export class AudioService {
       cleanup('client disconnected');
     });
 
-    // Pipe the audio safely
     ytdlpProc.stdout.pipe(ffmpegProc.stdin);
     ffmpegProc.stdout.pipe(res);
   }
